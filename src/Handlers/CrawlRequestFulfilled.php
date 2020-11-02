@@ -129,7 +129,11 @@ class CrawlRequestFulfilled
     {
         $browsershot = $this->crawler->getBrowsershot();
 
-        $html = $browsershot->setUrl((string) $url)->bodyHtml();
+        try {
+            $html = $browsershot->setUrl((string) $url)->bodyHtml();
+        } catch (\Exception $exception) {
+            $html = '';
+        }
 
         return html_entity_decode($html);
     }
