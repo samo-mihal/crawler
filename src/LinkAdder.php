@@ -3,9 +3,11 @@
 namespace Spatie\Crawler;
 
 use GuzzleHttp\Psr7\Uri;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use Psr\Http\Message\UriInterface;
 use Symfony\Component\DomCrawler\Crawler as DomCrawler;
+use Symfony\Component\DomCrawler\Image;
 use Symfony\Component\DomCrawler\Link;
 use Tree\Node\Node;
 
@@ -24,6 +26,12 @@ class LinkAdder
         $allLinks = $this->extractLinksFromHtml($html, $foundOnUrl);
 
         collect($allLinks)
+            ->reject(function ($url) {
+                if (empty($url)) {
+                    return true;
+                }
+                return false;
+            })
             ->filter(function (UriInterface $url) {
                 return $this->hasCrawlableScheme($url);
             })
@@ -55,32 +63,81 @@ class LinkAdder
      * @param string $html
      * @param \Psr\Http\Message\UriInterface $foundOnUrl
      *
-     * @return \Illuminate\Support\Collection|\Tightenco\Collect\Support\Collection|null
+     * @return array
      */
     protected function extractLinksFromHtml(string $html, UriInterface $foundOnUrl)
     {
+        /** Replace all " to ' in background image url */
+        $html = str_replace('url("', 'url(\'', $html);
+
+        $links = [];
         $domCrawler = new DomCrawler($html, $foundOnUrl);
 
-        return collect($domCrawler->filterXpath('//a | //link[@rel="next" or @rel="prev"]')->links())
-            ->reject(function (Link $link) {
-                if ($this->isInvalidHrefNode($link)) {
-                    return true;
-                }
+        /**
+         * Links from div background
+         */
+        $links = array_merge(
+            $links,
+            collect($domCrawler->filterXPath("//div[@style]")->extract(['style']))
+                ->map(function ($style) {
+                    try {
+                        $backGroundImageUrl = new Uri(Str::between($style, 'url(\'', '\')'));
+                        if (empty($backGroundImageUrl->getScheme())) {
+                            $backGroundImageUrl->withScheme($this->crawler->getBaseUrl()->getScheme());
+                        }
+                        if (empty($backGroundImageUrl->getHost())) {
+                            $backGroundImageUrl->withHost($this->crawler->getBaseUrl()->getHost());
+                        }
+                        return $backGroundImageUrl;
+                    } catch (InvalidArgumentException $exception) {
+                        return;
+                    }
+                })
+                ->toArray()
+        );
 
-                if ($this->crawler->mustRejectNofollowLinks() && $link->getNode()->getAttribute('rel') === 'nofollow') {
-                    return true;
-                }
+        /**
+         * Links from img src
+         */
+        $links = array_merge(
+            $links,
+            collect($domCrawler->filterXpath('//img')->images())
+                ->map(function (Image $image) {
+                    try {
+                        return new Uri($image->getUri());
+                    } catch (InvalidArgumentException $exception) {
+                        return;
+                    }
+                })
+                ->toArray()
+        );
 
-                return false;
-            })
-            ->map(function (Link $link) {
-                try {
-                    return new Uri($link->getUri());
-                } catch (InvalidArgumentException $exception) {
-                    return;
-                }
-            })
-            ->filter();
+        /**
+         * Links from a and link node
+         */
+        $links = array_merge(
+            $links,
+            collect($domCrawler->filterXpath('//a | //link[@rel="next" or @rel="prev"]')->links())
+                ->reject(function (Link $link) {
+                    if ($this->isInvalidHrefNode($link)) {
+                        return true;
+                    }
+
+                    if ($link->getNode()->getAttribute('rel') === 'nofollow') {
+                        return true;
+                    }
+
+                    return false;
+                })
+                ->map(function (Link $link) {
+                    try {
+                        return new Uri($link->getUri());
+                    } catch (InvalidArgumentException $exception) {
+                        return;
+                    }
+                })
+                ->filter()->toArray());
+        return $links;
     }
 
     protected function hasCrawlableScheme(UriInterface $uri): bool
